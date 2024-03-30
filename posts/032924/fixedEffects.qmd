@@ -1,0 +1,258 @@
+---
+title: "fixedEffects"
+author: "Brian Leung"
+date: "today"
+editor_options: 
+  chunk_output_type: console
+message: FALSE
+warning: FALSE
+---
+
+```{r, echo=FALSE}
+library(tidyverse)
+library(gapminder)
+library(stargazer)
+library(fixest)
+library(modelsummary)
+library(ggpubr)
+library(cowplot)
+library(RColorBrewer)
+
+colors <- RColorBrewer::brewer.pal(5, "Set1")
+blue <- colors[2]
+orange <- colors[5]
+options(ggplot2.discrete.colour= c(blue, orange))
+theme_set(theme_minimal_grid())
+theme_update(aspect.ratio = 1/1.618)
+```
+
+## What are fixed effects, exactly?
+
+### Pooling time-series data from two countries 
+
+Let's say we want to quantify the relationship between life expectancy as outcome, and GDP per capita (logged) as predictor. Let's focus on two countries – Germany and China – across time.
+
+```{r}
+gc <- gapminder %>%
+  filter(country %in% c("Germany", "China")) %>%
+  mutate(gdpPercap_log = log(gdpPercap))
+```
+
+Let's pretend that we forget about the group structure – we treat all data points as if they come from *one* place. Let's visualize the relationship between the two variables from the *pooled* data:
+
+```{r, echo=FALSE}
+ggplot(gc, aes(x = gdpPercap_log, y = lifeExp)) +
+  geom_point() +
+  geom_smooth(method = "lm", fill = NA, color = "black") +
+  stat_regline_equation(show.legend = FALSE) +
+  labs(title = "Total variation")
+```
+
+This is equivalent to running a naive regression pooling all data:
+
+```{r}
+m1 <- lm(lifeExp ~ gdpPercap_log, data = gc)
+```
+
+```{r, echo=FALSE}
+msummary(list("Pooled data" = m1), gof_map = c("nobs", "r.squared"))
+```
+
+### Within-group variation
+
+It is useful to think about where the variation comes from. The total variation can be broken down into two groups: (1) within-group variation, and (2) between-group variation.
+
+For within-group variation, it is just like fitting a regression line for each country separately – each country having its own intercept and slope. Let's visualize the within-group variation:
+
+```{r, echo=FALSE}
+ggplot(gc, aes(x = gdpPercap_log, y = lifeExp, color = country)) +
+  geom_point() +
+  geom_smooth(method = "lm", fill = NA, show.legend = FALSE) +
+  stat_regline_equation(show.legend = FALSE) +
+  labs(title = "Within-group variation", color = "Country")+
+  theme(legend.position = "top", legend.justification = "right")
+```
+
+This is equivalent to running two separate regressions on China and Germany data respectively:
+
+```{r}
+cdata <- gc %>% filter(country == "China")
+gdata <- gc %>% filter(country == "Germany")
+
+m2 <- lm(lifeExp ~ gdpPercap_log, data = cdata)
+m3 <- lm(lifeExp ~ gdpPercap_log, data = gdata)
+```
+
+```{r, echo=FALSE}
+msummary(list("China data" = m2, "Germany data" = m3), 
+         gof_map = c("nobs", "r.squared"))
+```
+
+### Between-group variation
+
+For between-group variation, we first compute the group-specific means for the two variable. Then we can draw a line between the two mean points:
+
+```{r}
+gc_mean <- 
+  gc %>%
+  group_by(country) %>%
+  summarize(
+    ymin = min(lifeExp), ymax = max(lifeExp),
+    xmin = min(gdpPercap_log), xmax = max(gdpPercap_log),
+    gdpPercap_log = mean(gdpPercap_log),
+    lifeExp = mean(lifeExp)
+  ) %>%
+  mutate(type = "mean")
+
+gc_wMean <- gc %>% 
+  mutate(type = "actual") %>% 
+  bind_rows(gc_mean)
+```
+
+```{r, echo=FALSE}
+ggplot(gc_wMean, aes(x = gdpPercap_log, y = lifeExp)) +
+  geom_linerange(aes(xmin = xmin, xmax = xmax, color = country), 
+                 linetype = 2, show.legend = FALSE) +
+  geom_linerange(aes(ymin = ymin, ymax = ymax, color = country),
+                 linetype = 2, show.legend = FALSE) +
+  geom_smooth(data = gc_mean, method = "lm", color = "black", size = 0.5) +
+  geom_point(aes(shape = type, size = type, color = country)) +
+  scale_shape_manual(values = c(1, 17)) +
+  stat_regline_equation(show.legend = FALSE) +
+  guides(shape = guide_legend(override.aes = list(size = 2.5))) +
+  labs(title = "Between-group variation", 
+       shape = "Type", size = "Type", color = "Country") +
+  theme(legend.position = "top", legend.justification = "right",
+        legend.spacing.x = unit(0.75, "in"))
+```
+
+We can then *purge* the between-group variation by re-orienting the country observations to its own origin – that is, subtracting the group mean from y-variable and x-variable:
+
+```{r}
+gc_within <- gc %>%
+  group_by(country) %>%
+  mutate(
+    gdpPercap_log_within = gdpPercap_log - mean(gdpPercap_log),
+    lifeExp_within = lifeExp - mean(lifeExp),
+    xmean = mean(gdpPercap_log_within),
+    ymean = mean(lifeExp_within)
+  ) 
+```
+
+```{r, echo = FALSE}
+ggplot(gc_within, aes(x = gdpPercap_log_within, y = lifeExp_within,
+                      color = country)) +
+  geom_point() +
+  geom_vline(aes(xintercept = xmean, color = country), linetype = 2) +
+  geom_hline(aes(yintercept = ymean, color = country), linetype = 2) +
+  facet_wrap(~ country) +
+  theme(legend.position = "none") +
+  labs(title = "De-meaning the variables by group")
+```
+
+Let's superimpose the two:
+
+```{r, echo=FALSE}
+ggplot(gc_within, aes(x = gdpPercap_log_within, y = lifeExp_within,
+                      color = country)) +
+  geom_point() +
+  geom_vline(xintercept = 0, color = blue) +
+  geom_hline(yintercept = 0, color = blue) +
+  geom_vline(xintercept = 0, color = orange, linetype = 2) +
+  geom_hline(yintercept = 0, color = orange, linetype = 2) +
+  labs(color = "Country") +
+  theme(legend.position = "top", legend.justification = "right") +
+  labs(title = "Purging between-group variation")
+```
+
+We get rid of any between-group difference. What are left are the within-group variations *within* the specific groups.
+
+If we fit a *single* regression line on the data as a whole after the between-variation is purged:
+
+```{r, echo=FALSE}
+ggplot(gc_within, aes(x = gdpPercap_log_within, y = lifeExp_within)) +
+  geom_smooth(method = "lm", color = "black", fill = NA) +
+  geom_point(aes(color = country)) +
+  stat_regline_equation(show.legend = FALSE) +
+  labs(title = "Within variation after between-variation is purged",
+       color = "Country") +
+  theme(legend.position = "top", legend.justification = "right")
+```
+
+This is equivalent to running a regression model using the within-variation of x-variable and y-variable. This is further equivalent to running a regression with country-specific intercepts. To see this:
+
+```{r}
+m4 <- lm(lifeExp_within ~ gdpPercap_log_within, data = gc_within)
+m5 <- lm(lifeExp ~ gdpPercap_log + country, data = gc)
+```
+
+```{r, echo=FALSE}
+msummary(list("Within variations" = m4, "Country dummy" = m5), 
+         gof_map = c("nobs", "r.squared"))
+```
+
+This is what fixed effect is doing – purging between-group variation and using only within-group variation. In other words, let us get rid of the systematic difference between China and Germany, and look at their within-variation together.
+
+It is also equivalent to saying: "When the value of the Germany dummy is held constant (i.e., looking at just Germany, or China), what is the relationship between life expectancy and GDP per capita?" This phrasing of fixed effects forces us to think about whether the inclusion of such effects make sense.
+
+### When will fixed effects fail? 
+
+Let's have a hypothetical treatment where all countries received treatment after the year of 1997. And suppose we run a two-way fixed effects model, controlling for year and country fixed effects, while attempting to estimate the treatment effects:
+
+```{r}
+gc_wTreat <- gc %>%
+  mutate(treat = as.numeric(year > 1997)) %>%
+  mutate(year = factor(year))
+
+m6 <- lm(lifeExp ~ treat + country + year, data = gc_wTreat)
+```
+
+```{r, echo=FALSE}
+msummary(list("''Treatment effects'' w/ TWFE" = m6), 
+         gof_map = c("nobs", "r.squared"), coef_omit = "year|country")
+```
+
+It seems like the treatment is positive and highly statistically significant!
+
+But if you look at the underlying estimated coefficients, the fixed effect for year 2007 has actually not estimated (i.e., NA):
+
+```{r}
+tidy(m6)
+```
+
+The estimated coefficient for the treatment is actually that for year 2007, if the treatment variable is dropped. To see this:
+
+```{r}
+m7 <- lm(lifeExp ~ country + year, data = gc_wTreat)
+tidy(m7) %>% filter(term == "year2007")
+```
+
+Which is equivalent to the treatment effect in the previous model
+
+```{r}
+tidy(m6) %>% filter(term == "treat")
+```
+
+Why is it the case? This is because the treatment variable is collinear with some year dummies. Because we define the treatment such that it has value of 1 if year is greater than 1997. In other words, after 1997, all treatment status is 1 for all observations.
+
+Adding a year fixed effect is equivalent to asking: **Holding a particular year constant, say 2002, what is the difference between the treated and non-treated observations in their outcomes?** You *can't answer that question* because there is no variation in treatment status after 1997!
+
+The illusion of having an estimable treatment effect is simply an artifact that `R` wants to avoid the problem of collinearity and drops one of the year fixed effect (year 2007 in this case). It prioritizes the treatment variable simply because in the model specification the `treat` term is put in front of the `year` term.
+
+To show this, revert the order of `treat` and `year`:
+
+```{r}
+m8 <- lm(lifeExp ~ country + year + treat, data = gc_wTreat)
+tidy(m8) %>% filter(term == "treat")
+```
+
+In this case, the treatment effect cannot be estimated. This shows the pitfall of blindly relying on `R` when you estimate models with a lot of fixed effects. Also, if simply changing the order of the terms gives you different results, you're probably in trouble which is not safe to ignore.
+
+A better to avoid this problem is using alternative packages, like `fixest`, that give better warning:
+
+```{r, warning=TRUE, message=TRUE}
+twfe_m1 <- feols(lifeExp ~ treat + gdpPercap_log | country + year, 
+                 data = gc_wTreat)
+```
+
+The above warning and the action to drop the collinear variable is much more sensible to prevent researchers from drawing wrong conclusion.
